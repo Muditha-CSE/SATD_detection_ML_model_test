@@ -1,171 +1,415 @@
-import joblib
+import os
 import re
+import joblib
+
+from scipy.sparse import hstack, csr_matrix
 
 
-# ===========================
-# Load trained model
-# ===========================
+
+MODEL_DIR = "model"
+
+
+
+# =====================================================
+# Load Models
+# =====================================================
+
 
 model = joblib.load(
-    "model/xgb_satd_model.pkl"
-)
-
-tfidf = joblib.load(
-    "model/tfidf_vectorizer.pkl"
-)
-
-label_encoder = joblib.load(
-    "model/label_encoder.pkl"
+    os.path.join(
+        MODEL_DIR,
+        "svm_satd_model.pkl"
+    )
 )
 
 
+word_vectorizer = joblib.load(
+    os.path.join(
+        MODEL_DIR,
+        "word_tfidf.pkl"
+    )
+)
 
-# ===========================
-# Text preprocessing
-# ===========================
+
+char_vectorizer = joblib.load(
+    os.path.join(
+        MODEL_DIR,
+        "char_tfidf.pkl"
+    )
+)
+
+
+encoder = joblib.load(
+    os.path.join(
+        MODEL_DIR,
+        "label_encoder.pkl"
+    )
+)
+
+
+satd_features = joblib.load(
+    os.path.join(
+        MODEL_DIR,
+        "satd_features.pkl"
+    )
+)
+
+
+
+
+
+# =====================================================
+# Cleaning
+# =====================================================
+
 
 def clean_comment(text):
 
-    text = str(text)
 
-    # Remove comment symbols
-    text = re.sub(
-        r'//|/\*|\*/|\*',
-        '',
+    text=str(text).lower()
+
+
+    text=re.sub(
+        r"http\S+",
+        " ",
         text
     )
 
-    # lowercase
-    text = text.lower()
 
-    # remove numbers
-    text = re.sub(
-        r'\d+',
-        '',
+    text=re.sub(
+        r"//|/\*|\*/|\*",
+        " ",
         text
     )
 
-    # remove special chars
-    text = re.sub(
-        r'[^a-z\s]',
-        ' ',
+
+    text=re.sub(
+        r"[^a-z0-9_\s]",
+        " ",
         text
     )
 
-    # remove extra spaces
-    text = re.sub(
-        r'\s+',
-        ' ',
+
+    text=re.sub(
+        r"\s+",
+        " ",
         text
     )
+
 
     return text.strip()
 
 
 
-# ===========================
-# Prediction function
-# ===========================
 
-def predict_satd(comment):
+
+
+# =====================================================
+# SAME SATD FEATURE EXTRACTION
+# =====================================================
+
+
+def extract_satd_features(text):
+
+
+    features=[]
+
+
+
+    # Weighted scores
+
+    for category,keywords in satd_features.items():
+
+
+        score=0
+
+
+        for phrase,weight in keywords.items():
+
+
+            if phrase in text:
+
+
+                score += weight * 5
+
+
+
+        features.append(score)
+
+
+
+
+
+    # Binary indicators
+
+    for category,keywords in satd_features.items():
+
+
+        found=0
+
+
+        for phrase in keywords:
+
+
+            if phrase in text:
+
+                found=1
+
+                break
+
+
+
+        features.append(found)
+
+
+
+    return features
+
+
+
+
+
+
+
+# =====================================================
+# Prediction
+# =====================================================
+
+
+def predict(comment):
+
 
     cleaned = clean_comment(comment)
 
 
-    # Convert text to TF-IDF
 
-    vector = tfidf.transform(
+    word_features = word_vectorizer.transform(
         [cleaned]
     )
 
 
-    # Predict class
+
+    char_features = char_vectorizer.transform(
+        [cleaned]
+    )
+
+
+
+    satd_feature = csr_matrix(
+        [
+            extract_satd_features(cleaned)
+        ]
+    )
+
+
+
+    final_features = hstack(
+
+        [
+
+            word_features,
+
+            char_features,
+
+            satd_feature
+
+        ]
+
+    )
+
+
+
+    print(
+        "Feature size:",
+        final_features.shape[1]
+    )
+
+
+    print(
+        "Model expects:",
+        model.n_features_in_
+    )
+
+
 
     prediction = model.predict(
-        vector
+        final_features
     )
 
 
-    # Convert number back to label
 
-    label = label_encoder.inverse_transform(
+    label = encoder.inverse_transform(
         prediction
-    )[0]
-
-
-    # Probability
-
-    probabilities = model.predict_proba(
-        vector
     )
 
 
-    confidence = max(probabilities[0])
+
+    # SVM confidence
+
+    decision = model.decision_function(
+        final_features
+    )
 
 
-    return {
-        "comment": comment,
-        "is_satd": label != "non_debt",
-        "satd_type": None if label == "non_debt" else label,
-        "confidence": round(float(confidence), 2)
-    }
+    confidence = max(
+        decision[0]
+    )
 
 
 
-# ===========================
-# Test Cases
-# ===========================
+    return label[0], confidence
 
 
-test_comments = [
 
-    "// TODO: Refactor this method because it has too many responsibilities",
 
-    "// FIXME: This workaround is required because the legacy API is unstable",
 
-    "// TODO: Optimize this database query. Currently it performs badly with large datasets",
 
-    "// TODO: Add proper exception handling instead of catching generic Exception",
+# =====================================================
+# Test Comments
+# =====================================================
 
-    "// FIXME: Remove this temporary solution after migrating to the new payment service",
 
-    "// TODO: Add unit tests for this service before production release",
+test_comments=[
 
-    "// FIXME: Missing integration tests for the authentication flow",
 
-    "// TODO: Add API documentation for this endpoint",
 
-    "// FIXME: Update the README with deployment instructions",
+"""
+TODO this class is too complex.
+Need refactoring because the design is difficult to maintain.
+""",
 
-    "// TODO: Document why this algorithm uses this approach",
 
-    "// TODO: Support multiple payment providers in the future",
 
-    "// FIXME: This feature only supports single currency currently",
+"""
+FIXME this causes a NullPointerException.
+Validation logic is broken.
+""",
 
-    "// TODO: Implement role-based access control for admin users",
 
-    "// TODO: Replace this hardcoded configuration with environment variables",
 
-    "// FIXME: Temporary database connection handling. Needs proper connection pooling",
+"""
+Support for multiple payment providers is not implemented yet.
+This feature should be implemented later.
+""",
 
-    "// TODO: Improve logging and add monitoring support",
 
-    "// HACK: We are bypassing validation here because of an old client issue",
 
-    "// XXX: This implementation is slow but works for now",
+"""
+Fix typo in API documentation.
+Update README and document missing information.
+""",
 
-    "// TODO: Add password complexity validation rules",
 
-    "// TODO: Remove deprecated authentication method after all users migrate"
+
+"""
+TODO add unit tests for this function.
+Current code has no test coverage.
+""",
+
+
+
+"""
+Calculate the total payment amount and return the response.
+""",
+
+
+
+"""
+This method contains duplicate code and poor design.
+Refactor this implementation.
+""",
+
+
+
+"""
+Integration testing is missing for the payment service.
+Coverage should be improved.
+""",
+
+
+
+"""
+The application crashes when database connection fails.
+Exception handling needs improvement.
+""",
+
+
+
+"""
+The system does not support Google login.
+OAuth authentication needs to be added.
+""",
+
+
+
+"""
+The API documentation is outdated.
+Update the developer guide with new endpoints.
+""",
+
+
+
+"""
+This class has memory leaks and unnecessary complexity.
+Cleanup is required.
+""",
+
+
+
+"""
+The current tests are flaky and fail randomly.
+Investigate unstable test cases.
+""",
+
+
+
+"""
+Create a new user account and save the details.
+""",
+
+
+
+"""
+Initialize the database connection pool.
+"""
 
 ]
 
 
+
+
+
+
+
+# =====================================================
+# Run
+# =====================================================
+
+
+print("\nSATD RESULTS")
+print("="*60)
+
+
+
 for comment in test_comments:
 
-    result = predict_satd(comment)
 
-    print("\n----------------------")
+    label,score = predict(comment)
 
-    print(result)
+
+
+    print("\nComment:")
+    print(comment.strip())
+
+
+    print("\nPrediction:")
+    print(label)
+
+
+    print("\nConfidence:")
+    print(
+        round(score,4)
+    )
+
+
+    print("-"*60)

@@ -1,0 +1,698 @@
+import os
+import re
+import joblib
+import pandas as pd
+
+from scipy.sparse import hstack, csr_matrix
+
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.preprocessing import LabelEncoder
+from sklearn.svm import LinearSVC
+
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    confusion_matrix,
+    f1_score
+)
+
+
+DATASET_PATH = "dataset/satd_dataset.csv"
+MODEL_DIR = "model"
+
+
+
+# ==================================================
+# Load Dataset
+# ==================================================
+
+df = pd.read_csv(DATASET_PATH)
+
+
+df = df.rename(
+    columns={
+        "text": "comment"
+    }
+)
+
+
+df = df[
+    [
+        "comment",
+        "classification"
+    ]
+].dropna()
+
+
+
+df = df.drop_duplicates(
+    subset=["comment"]
+)
+
+
+
+# ==================================================
+# CHANGE 1:
+# Merge small SATD categories
+#
+# defect_debt
+# requirement_debt
+# documentation_debt
+#
+#        |
+#        v
+#
+# functional_debt
+# ==================================================
+
+df["classification"] = df["classification"].replace(
+
+    {
+        "defect_debt": "functional_debt",
+        "requirement_debt": "functional_debt",
+        "documentation_debt": "functional_debt"
+    }
+
+)
+
+
+
+print("\nOriginal Dataset Distribution")
+
+print(
+    df["classification"]
+    .value_counts()
+)
+
+
+
+# ==================================================
+# CHANGE 2:
+# Reduce non_debt dominance
+#
+# Before:
+# non_debt = 35522
+#
+# After:
+# non_debt = 10000
+#
+# This improves minority class learning
+# ==================================================
+
+
+non_debt = df[
+    df["classification"] == "non_debt"
+]
+
+
+debt = df[
+    df["classification"] != "non_debt"
+]
+
+
+non_debt_sample = non_debt.sample(
+
+    n=10000,
+
+    random_state=42
+
+)
+
+
+
+df = pd.concat(
+
+    [
+        non_debt_sample,
+        debt
+    ],
+
+    ignore_index=True
+
+)
+
+
+
+print("\nAfter Non-Debt Reduction")
+
+print(
+    df["classification"]
+    .value_counts()
+)
+
+
+
+# ==================================================
+# Text Cleaning
+# ==================================================
+
+def clean_comment(text):
+
+    text = str(text).lower()
+
+
+    # remove urls
+    text = re.sub(
+        r"http\S+",
+        " ",
+        text
+    )
+
+
+    # remove comment syntax
+    text = re.sub(
+        r"//|/\*|\*/|\*",
+        " ",
+        text
+    )
+
+
+    # keep programming words
+    text = re.sub(
+        r"[^a-z0-9_\s]",
+        " ",
+        text
+    )
+
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    )
+
+
+    return text.strip()
+
+
+
+df["clean_comment"] = df["comment"].apply(
+    clean_comment
+)
+
+
+
+# ==================================================
+# CHANGE 3:
+# Better SATD keyword features
+# ==================================================
+
+satd_keywords = [
+
+    # General SATD
+    "todo",
+    "fixme",
+    "hack",
+    "temporary",
+    "workaround",
+    "later",
+    "deprecated",
+    "obsolete",
+    "cleanup",
+
+
+    # Functional debt
+    "bug",
+    "error",
+    "issue",
+    "broken",
+    "exception",
+    "missing",
+    "not implemented",
+    "unsupported",
+    "should support",
+    "need support",
+    "requirement",
+    "feature request",
+    "documentation",
+    "document",
+    "javadoc",
+    "readme",
+
+
+    # Design debt
+    "refactor",
+    "complex",
+    "duplicate",
+    "bad design",
+    "poor design",
+
+
+    # Test debt
+    "test",
+    "unit test",
+    "coverage",
+    "testing"
+
+]
+
+
+
+def keyword_features(text):
+
+    result = []
+
+
+    for word in satd_keywords:
+
+        if word in text:
+
+            result.append(1)
+
+        else:
+
+            result.append(0)
+
+
+    return result
+
+
+
+keyword_matrix = csr_matrix(
+
+    df["clean_comment"]
+    .apply(keyword_features)
+    .tolist()
+
+)
+
+
+
+# ==================================================
+# Label Encoding
+# ==================================================
+
+X = df["clean_comment"]
+
+
+encoder = LabelEncoder()
+
+
+y = encoder.fit_transform(
+    df["classification"]
+)
+
+
+
+print("\nClass Mapping")
+
+for i, label in enumerate(encoder.classes_):
+
+    print(
+        i,
+        "=",
+        label
+    )
+
+
+
+# ==================================================
+# Train Test Split
+# ==================================================
+
+X_train, X_test, y_train, y_test, kw_train, kw_test = train_test_split(
+
+    X,
+
+    y,
+
+    keyword_matrix,
+
+    test_size=0.2,
+
+    random_state=42,
+
+    stratify=y
+
+)
+
+
+
+# ==================================================
+# Word TF-IDF
+#
+# CHANGE 4:
+# Removed stop_words="english"
+#
+# SATD words such as:
+# should
+# need
+# missing
+# later
+#
+# are important
+# ==================================================
+
+word_vectorizer = TfidfVectorizer(
+
+    analyzer="word",
+
+    lowercase=True,
+
+    stop_words=None,
+
+    ngram_range=(1,3),
+
+    max_features=100000,
+
+    sublinear_tf=True,
+
+    min_df=2
+
+)
+
+
+
+X_train_word = word_vectorizer.fit_transform(
+    X_train
+)
+
+
+X_test_word = word_vectorizer.transform(
+    X_test
+)
+
+
+
+# ==================================================
+# Character TF-IDF
+# ==================================================
+
+char_vectorizer = TfidfVectorizer(
+
+    analyzer="char",
+
+    ngram_range=(3,5),
+
+    max_features=100000,
+
+    sublinear_tf=True,
+
+    min_df=2
+
+)
+
+
+
+X_train_char = char_vectorizer.fit_transform(
+    X_train
+)
+
+
+X_test_char = char_vectorizer.transform(
+    X_test
+)
+
+
+
+# ==================================================
+# Combine Features
+# ==================================================
+
+X_train_final = hstack(
+
+    [
+        X_train_word,
+        X_train_char,
+        kw_train
+    ]
+
+)
+
+
+
+X_test_final = hstack(
+
+    [
+        X_test_word,
+        X_test_char,
+        kw_test
+    ]
+
+)
+
+
+
+print("\nTraining Distribution")
+
+print(
+
+    pd.Series(y_train)
+    .value_counts()
+    .sort_index()
+
+)
+
+
+
+# ==================================================
+# CHANGE 5:
+# Use balanced class weights
+#
+# Do NOT use manual weights
+# ==================================================
+
+model = LinearSVC(
+
+    C=1.0,
+
+    class_weight="balanced",
+
+    max_iter=30000,
+
+    random_state=42
+
+)
+
+
+
+model.fit(
+
+    X_train_final,
+
+    y_train
+
+)
+
+
+
+# ==================================================
+# Evaluation
+# ==================================================
+
+pred = model.predict(
+    X_test_final
+)
+
+
+
+print("\nAccuracy:")
+
+print(
+
+    accuracy_score(
+        y_test,
+        pred
+    )
+
+)
+
+
+
+print("\nMacro F1:")
+
+print(
+
+    f1_score(
+        y_test,
+        pred,
+        average="macro"
+    )
+
+)
+
+
+
+print("\nWeighted F1:")
+
+print(
+
+    f1_score(
+        y_test,
+        pred,
+        average="weighted"
+    )
+
+)
+
+
+
+print("\nClassification Report")
+
+
+print(
+
+    classification_report(
+
+        y_test,
+
+        pred,
+
+        target_names=encoder.classes_,
+
+        digits=4,
+
+        zero_division=0
+
+    )
+
+)
+
+
+
+print("\nConfusion Matrix")
+
+
+print(
+
+    confusion_matrix(
+
+        y_test,
+
+        pred
+
+    )
+
+)
+
+
+
+# ==================================================
+# Save Model
+# ==================================================
+
+os.makedirs(
+
+    MODEL_DIR,
+
+    exist_ok=True
+
+)
+
+
+
+joblib.dump(
+
+    model,
+
+    os.path.join(
+        MODEL_DIR,
+        "svm_satd_model.pkl"
+    )
+
+)
+
+
+
+joblib.dump(
+
+    word_vectorizer,
+
+    os.path.join(
+        MODEL_DIR,
+        "word_tfidf.pkl"
+    )
+
+)
+
+
+
+joblib.dump(
+
+    char_vectorizer,
+
+    os.path.join(
+        MODEL_DIR,
+        "char_tfidf.pkl"
+    )
+
+)
+
+
+
+joblib.dump(
+
+    encoder,
+
+    os.path.join(
+        MODEL_DIR,
+        "label_encoder.pkl"
+    )
+
+)
+
+
+
+print("\nTraining completed successfully.")
+
+
+"""
+Original Dataset Distribution
+classification
+non_debt            35522
+code/design_debt     2262
+functional_debt       950
+test_debt              81
+Name: count, dtype: int64
+
+After Non-Debt Reduction
+classification
+non_debt            10000
+code/design_debt     2262
+functional_debt       950
+test_debt              81
+Name: count, dtype: int64
+
+Class Mapping
+0 = code/design_debt
+1 = functional_debt
+2 = non_debt
+3 = test_debt
+
+Training Distribution
+0    1809
+1     760
+2    8000
+3      65
+Name: count, dtype: int64
+
+Accuracy:
+0.8999623918766454
+
+Macro F1:
+0.7373603573559693
+
+Weighted F1:
+0.8963926268893386
+
+Classification Report
+                  precision    recall  f1-score   support
+
+code/design_debt     0.7581    0.7263    0.7418       453
+ functional_debt     0.5860    0.4842    0.5303       190
+        non_debt     0.9552    0.9805    0.9677      2000
+       test_debt     0.7333    0.6875    0.7097        16
+
+        accuracy                         0.9000      2659
+       macro avg     0.7581    0.7196    0.7374      2659
+    weighted avg     0.8939    0.9000    0.8964      2659
+
+
+Confusion Matrix
+[[ 329   53   70    1]
+ [  75   92   20    3]
+ [  28   11 1961    0]
+ [   2    1    2   11]]
+
+Training completed successfully."""
